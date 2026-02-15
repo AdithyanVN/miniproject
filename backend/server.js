@@ -4,7 +4,6 @@ import { fileURLToPath } from "url";
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
-import cheerio from "cheerio";
 
 // Resolve directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
