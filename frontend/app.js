@@ -19,7 +19,7 @@ async function summarize() {
   if (metricsEl) metricsEl.innerText = "";
 
   try {
-    const response = await fetch("http://localhost:3000/summarize", {
+    const response = await fetch("/summarize", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
