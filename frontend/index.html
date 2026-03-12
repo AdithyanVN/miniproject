@@ -2,27 +2,116 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>AI Web Summarizer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Summarify — AI Web Content Summarizer</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <header class="site-header">
+    <nav class="nav container">
+      <div class="brand">Summarify</div>
+      <div class="nav-links">
+        <a href="#about">About</a>
+        <a href="#techstack">Tech Stack</a>
+        <a href="#try-now">Try Now</a>
+        <a href="#contact">Contact</a>
+      </div>
+    </nav>
 
-  <h1>AI Web Content Summarizer</h1>
+    <section class="hero container">
+      <p class="pill">AI-powered content condensation</p>
+      <h1>Turn long-form content into concise, useful insights.</h1>
+      <p class="hero-copy">
+        Paste text, fetch content from a webpage URL, or upload a file (.txt, .pdf, .doc, .docx), then export your summary as TXT or PDF.
+      </p>
+      <a class="cta" href="#try-now">Try it now ↓</a>
+    </section>
+  </header>
 
-  <textarea id="inputText" placeholder="Paste text here..."></textarea>
+  <main>
+    <section id="about" class="section container reveal">
+      <h2>About</h2>
+      <p>
+        Summarify is a mini project focused on extracting the core meaning from large chunks of information while providing readability and compression metrics.
+      </p>
+    </section>
 
-  <br />
-  <button onclick="summarize()">Summarize</button>
+    <section id="techstack" class="section container reveal">
+      <h2>Tech Stack</h2>
+      <div class="cards">
+        <article class="card"><h3>Frontend</h3><p>Semantic HTML, modern CSS, and vanilla JavaScript.</p></article>
+        <article class="card"><h3>Backend</h3><p>Node.js + Express API for extraction and summarization workflows.</p></article>
+        <article class="card"><h3>AI</h3><p>Hugging Face inference endpoint using BART-large-CNN summarization.</p></article>
+      </div>
+    </section>
 
-  <h2>Summary</h2>
-  <p id="summary"></p>
-  <h3>Summary Metrics</h3>
-  <div id="metrics"></div>
-  <h3>Keywords</h3>
-  <p id="keywords"></p>
+    <section id="try-now" class="section container reveal">
+      <h2>Try Now</h2>
+      <p class="subtle">Choose one input mode, review extracted text, and generate your summary.</p>
 
-  <h3>Important Points</h3>
-  <ul id="points"></ul>
+      <div class="input-tabs" role="tablist" aria-label="Input source">
+        <button class="tab active" data-tab="manual" type="button">Manual Text</button>
+        <button class="tab" data-tab="url" type="button">Webpage URL</button>
+        <button class="tab" data-tab="file" type="button">Upload File</button>
+      </div>
+
+      <div class="panel" id="panel-manual">
+        <label for="manualText">Paste content</label>
+        <textarea id="manualText" placeholder="Paste text here (min 100 chars)..."></textarea>
+      </div>
+
+      <div class="panel hidden" id="panel-url">
+        <label for="urlInput">Webpage URL</label>
+        <div class="row">
+          <input id="urlInput" type="url" placeholder="https://example.com/article" />
+          <button id="fetchUrlBtn" type="button">Extract</button>
+        </div>
+      </div>
+
+      <div class="panel hidden" id="panel-file">
+        <label for="fileInput">Upload file (.txt, .pdf, .doc, .docx)</label>
+        <div class="row">
+          <input id="fileInput" type="file" accept=".txt,.pdf,.doc,.docx" />
+          <button id="extractFileBtn" type="button">Extract</button>
+        </div>
+      </div>
+
+      <label for="inputText">Prepared text (editable before summarizing)</label>
+      <textarea id="inputText" placeholder="Your extracted or pasted text appears here..."></textarea>
+
+      <div class="row wrap">
+        <button id="summarizeBtn" type="button" class="accent">Generate Summary</button>
+        <button id="downloadTxtBtn" type="button">Download .txt</button>
+        <button id="downloadPdfBtn" type="button">Download .pdf</button>
+      </div>
+
+      <p id="status" class="status" aria-live="polite"></p>
+
+      <div class="results">
+        <h3>Summary</h3>
+        <p id="summary"></p>
+
+        <h3>Summary Metrics</h3>
+        <div id="metrics"></div>
+
+        <h3>Keywords</h3>
+        <p id="keywords">—</p>
+
+        <h3>Important Points</h3>
+        <ul id="points"></ul>
+      </div>
+    </section>
+
+    <section id="contact" class="section container reveal">
+      <h2>Contact</h2>
+      <p>
+        This project is built as an educational full-stack mini application.
+        You can extend it with stronger file parsers, keyword extraction, and multilingual summarization.
+      </p>
+    </section>
+  </main>
+
+  <footer class="footer">© <span id="year"></span> Summarify</footer>
 
   <script src="app.js"></script>
 </body>
