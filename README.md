@@ -49,3 +49,44 @@ It helps users turn long content into concise insights quickly.
 - URL extraction works better for public article pages and may fail on heavily protected websites.
 - `.txt` extraction is most accurate in this version.
 - `.pdf/.doc/.docx` use lightweight fallback extraction and can be improved later with dedicated parser libraries.
+
+## Resolving PR Conflicts (Recommended Workflow)
+If GitHub shows **Resolve conflicts** for this PR, avoid blindly clicking **Accept incoming** for every block.
+
+### Quick rule
+- **Accept current**: keep this branch’s AIWOCS redesign behavior.
+- **Accept incoming**: only when the target branch has a newer fix you definitely need.
+- **Manual combine**: preferred for most conflicts in this project.
+
+### File-by-file guidance
+- `frontend/index.html` + `frontend/app.js` + `frontend/styles.css`
+  - Resolve these together as one UI system.
+  - Keep matching IDs/classes between HTML and JS (`manualText`, `urlInput`, `fileInput`, `summary`, `keywords`, `points`, `metrics`, `downloadMenu`).
+  - Keep the current two-panel Try Now layout and download dropdown behavior.
+
+- `backend/server.js`
+  - Keep helper functions: `normalizeUrl`, `stripHtmlToText`, `extractTextFromUploadedFile`, `extractKeywords`.
+  - Keep routes: `POST /extract-url`, `POST /extract-file`, `POST /summarize`, and compatibility `POST /scrape`.
+  - Ensure response field naming stays consistent with frontend (`withinRecommendedLength`, `keywords`, `points`).
+
+- `README.md`
+  - Prefer manual text merge to preserve project branding (`AIWOCS`) and setup instructions.
+
+### Safe local flow
+```bash
+git fetch origin
+git checkout work
+git merge origin/main
+# resolve files, then
+git add README.md backend/server.js frontend/index.html frontend/app.js frontend/styles.css
+npm run check
+git commit -m "Resolve merge conflicts with main"
+git push
+```
+
+### Post-merge sanity checks
+```bash
+npm run check
+npm start
+```
+Open `http://localhost:3000` and verify manual/url/file input mode, summary generation path, and download dropdown.
