@@ -13,6 +13,9 @@ dotenv.config({ path: path.join(__dirname, ".env") });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HF_MODEL_URL = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-cnn";
+const HF_MAX_CHUNK_WORDS = 700;
+const HF_REDUCTION_PASSES = 3;
 
 app.use(cors());
 app.use(express.json({ limit: "12mb" }));
@@ -87,6 +90,81 @@ function extractKeywords(text, maxCount = 8) {
     .map(([word]) => word);
 }
 
+function chunkTextByWords(text, maxWords = HF_MAX_CHUNK_WORDS) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return [text.trim()];
+
+  const chunks = [];
+  for (let i = 0; i < words.length; i += maxWords) {
+    chunks.push(words.slice(i, i + maxWords).join(" "));
+  }
+  return chunks;
+}
+
+async function summarizeWithHuggingFace(inputText) {
+  const hfResponse = await fetch(HF_MODEL_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.HF_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      inputs: inputText,
+      parameters: {
+        max_length: 180,
+        min_length: 80,
+        do_sample: false,
+        length_penalty: 2.0,
+        repetition_penalty: 1.2,
+        early_stopping: true
+      }
+    })
+  });
+
+  const result = await hfResponse.json();
+
+  if (!hfResponse.ok || result?.error) {
+    const modelError = result?.error || "HuggingFace inference error.";
+    if (/index out of range/i.test(modelError)) {
+      throw new Error("Input is too long for a single model pass. Please try a shorter text or URL.");
+    }
+    throw new Error(modelError);
+  }
+
+  const summaryText = Array.isArray(result)
+    ? result[0]?.summary_text
+    : result?.summary_text;
+
+  if (!summaryText) {
+    throw new Error("Invalid response format from HuggingFace.");
+  }
+
+  return summaryText.trim();
+}
+
+async function summarizeLongText(text) {
+  let workingText = text;
+
+  for (let pass = 0; pass < HF_REDUCTION_PASSES; pass += 1) {
+    const chunks = chunkTextByWords(workingText, HF_MAX_CHUNK_WORDS);
+
+    if (chunks.length === 1) {
+      return summarizeWithHuggingFace(chunks[0]);
+    }
+
+    const chunkSummaries = [];
+    for (const chunk of chunks) {
+      const summary = await summarizeWithHuggingFace(chunk);
+      chunkSummaries.push(summary);
+    }
+
+    workingText = chunkSummaries.join(" ");
+  }
+
+  const fallbackChunks = chunkTextByWords(workingText, HF_MAX_CHUNK_WORDS);
+  return fallbackChunks[0];
+}
+
 async function fetchPageTextFromUrl(url) {
   const response = await fetch(url, {
     redirect: "follow",
@@ -142,7 +220,6 @@ app.post("/extract-file", (req, res) => {
   }
 });
 
-// AI Summarization Route
 app.post("/summarize", async (req, res) => {
   try {
     const { text } = req.body;
@@ -153,46 +230,17 @@ app.post("/summarize", async (req, res) => {
       });
     }
 
-    const hfResponse = await fetch(
-      "https://router.huggingface.co/hf-inference/models/facebook/bart-large-cnn",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.HF_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          inputs: text,
-          parameters: {
-            max_length: 180,
-            min_length: 80,
-            do_sample: false,
-            length_penalty: 2.0,
-            repetition_penalty: 1.2,
-            early_stopping: true
-          }
-        })
-      }
-    );
-
-    const result = await hfResponse.json();
-
-    if (!hfResponse.ok || result.error) {
+    if (!process.env.HF_API_KEY) {
       return res.status(500).json({
-        error: result.error || "HuggingFace inference error."
+        error: "HF_API_KEY is missing on server. Please configure backend/.env."
       });
     }
 
-    if (!result[0]?.summary_text) {
-      return res.status(500).json({
-        error: "Invalid response format from HuggingFace."
-      });
-    }
+    const cleanInputText = text.replace(/\s+/g, " ").trim();
+    const summary = await summarizeLongText(cleanInputText);
 
-    const summary = result[0].summary_text.trim();
-
-    const originalWordCount = text.trim().split(/\s+/).length;
-    const originalSentenceCount = text
+    const originalWordCount = cleanInputText.split(/\s+/).length;
+    const originalSentenceCount = cleanInputText
       .split(/[.!?]+/)
       .filter(s => s.trim().length > 0).length;
 
@@ -217,7 +265,7 @@ app.post("/summarize", async (req, res) => {
       .map(s => s.trim())
       .filter(s => s.length > 20);
 
-    const keywords = extractKeywords(summary.length > 150 ? summary : text, 8);
+    const keywords = extractKeywords(summary.length > 150 ? summary : cleanInputText, 8);
 
     res.json({
       summary,
@@ -238,7 +286,7 @@ app.post("/summarize", async (req, res) => {
   } catch (error) {
     console.error("Server Error:", error.message);
     res.status(500).json({
-      error: "AI summarization failed. Ensure HF_API_KEY is configured and network is available."
+      error: error.message || "AI summarization failed. Ensure HF_API_KEY is configured and network is available."
     });
   }
 });
