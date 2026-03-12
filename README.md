@@ -1,20 +1,93 @@
-# AI Web Content Summarizer (Mini Project)
+# AIWOCS — AI Web Content Summarizer
 
-This project is a browser-based web application that summarizes large text content using Natural Language Processing (NLP).
+AIWOCS is a browser-based summarization web app built as a **B.Tech Mini Project** by a team of 5 students.
+It helps users turn long content into concise insights quickly.
 
 ## Features
-- Text summarization
-- Keyword extraction
-- Important point detection
-- Fully offline processing
-- No paid APIs required
+- AI-powered abstractive summarization via Hugging Face (BART-large-CNN)
+- Simple one-click summarize flow from any one input mode:
+  - Paste text manually
+  - Provide webpage URL
+  - Upload files (`.txt`, `.pdf`, `.doc`, `.docx`)
+- Summary insights:
+  - keywords
+  - important points
+  - word/sentence metrics + compression ratio + one-third rule check
+- Download summary as:
+  - `.txt`
+  - `.pdf`
 
 ## Tech Stack
 - Frontend: HTML, CSS, JavaScript
 - Backend: Node.js, Express
-- NLP: Extractive summarization (word frequency based)
+- AI API: Hugging Face Inference Router
 
-## How to Run
+## Project Structure
+- `backend/server.js` — extraction endpoints, summarization route, metrics/keywords generation
+- `backend/summarizer.js` — optional local extractive utility (not currently wired)
+- `frontend/index.html` — multi-section UI and app layout
+- `frontend/styles.css` — visual design, hover effects, animations
+- `frontend/app.js` — source-tab logic, summarize workflow, and export actions
 
-### 1. Install dependencies
-npm install
+## Setup
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Create `backend/.env`:
+   ```env
+   HF_API_KEY=your_huggingface_token
+   PORT=3000
+   ```
+3. Start the app:
+   ```bash
+   npm start
+   ```
+4. Open `http://localhost:3000`
+
+## Notes
+- Long URL/file/manual inputs are automatically chunked server-side before AI summarization to avoid model context overflow errors (e.g., "index out of range in self").
+- URL extraction works better for public article pages and may fail on heavily protected websites.
+- `.txt` extraction is most accurate in this version.
+- `.pdf/.doc/.docx` use lightweight fallback extraction and can be improved later with dedicated parser libraries.
+
+## Resolving PR Conflicts (Recommended Workflow)
+If GitHub shows **Resolve conflicts** for this PR, avoid blindly clicking **Accept incoming** for every block.
+
+### Quick rule
+- **Accept current**: keep this branch’s AIWOCS redesign behavior.
+- **Accept incoming**: only when the target branch has a newer fix you definitely need.
+- **Manual combine**: preferred for most conflicts in this project.
+
+### File-by-file guidance
+- `frontend/index.html` + `frontend/app.js` + `frontend/styles.css`
+  - Resolve these together as one UI system.
+  - Keep matching IDs/classes between HTML and JS (`manualText`, `urlInput`, `fileInput`, `summary`, `keywords`, `points`, `metrics`, `downloadMenu`).
+  - Keep the current two-panel Try Now layout and download dropdown behavior.
+
+- `backend/server.js`
+  - Keep helper functions: `normalizeUrl`, `stripHtmlToText`, `extractTextFromUploadedFile`, `extractKeywords`.
+  - Keep routes: `POST /extract-url`, `POST /extract-file`, `POST /summarize`, and compatibility `POST /scrape`.
+  - Ensure response field naming stays consistent with frontend (`withinRecommendedLength`, `keywords`, `points`).
+
+- `README.md`
+  - Prefer manual text merge to preserve project branding (`AIWOCS`) and setup instructions.
+
+### Safe local flow
+```bash
+git fetch origin
+git checkout work
+git merge origin/main
+# resolve files, then
+git add README.md backend/server.js frontend/index.html frontend/app.js frontend/styles.css
+npm run check
+git commit -m "Resolve merge conflicts with main"
+git push
+```
+
+### Post-merge sanity checks
+```bash
+npm run check
+npm start
+```
+Open `http://localhost:3000` and verify manual/url/file input mode, summary generation path, and download dropdown.
