@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Summarify — AI Web Content Summarizer</title>
+  <title>AIWOCS — AI Web Content Summarizer</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="site-header">
     <nav class="nav container">
-      <div class="brand">Summarify</div>
+      <div class="brand">AIWOCS</div>
       <div class="nav-links">
         <a href="#about">About</a>
         <a href="#techstack">Tech Stack</a>
@@ -19,99 +19,115 @@
     </nav>
 
     <section class="hero container">
-      <p class="pill">AI-powered content condensation</p>
-      <h1>Turn long-form content into concise, useful insights.</h1>
+      <p class="pill">B.Tech Mini Project • Team of 5</p>
+      <h1>AIWOCS — Read less, understand more, decide faster.</h1>
       <p class="hero-copy">
         Paste text, fetch content from a webpage URL, or upload a file (.txt, .pdf, .doc, .docx), then export your summary as TXT or PDF.
+      </p>
+      <p class="hero-thought">
+        In a world overloaded with information, AIWOCS helps you capture the signal, skip the noise, and focus on what really matters.
       </p>
       <a class="cta" href="#try-now">Try it now ↓</a>
     </section>
   </header>
 
   <main>
-    <section id="about" class="section container reveal">
-      <h2>About</h2>
+    <section id="about" class="section container glass reveal hover-lift">
+      <h2>About AIWOCS</h2>
       <p>
-        Summarify is a mini project focused on extracting the core meaning from large chunks of information while providing readability and compression metrics.
+        <strong>AIWOCS (AI Web Content Summarizer)</strong> is a mini group project built by 5 B.Tech students to make long content easier to consume.
+        Our goal is simple: transform lengthy articles, notes, and documents into crisp summaries with key insights.
       </p>
+      <ul class="feature-list">
+        <li>⚡ Multiple input modes: manual text, webpage URL, and file upload</li>
+        <li>🧠 AI abstractive summarization with readability metrics</li>
+        <li>🎯 Keyword and important-point highlighting for quick understanding</li>
+        <li>📥 Instant export to TXT or PDF for sharing and revision</li>
+      </ul>
     </section>
 
     <section id="techstack" class="section container reveal">
       <h2>Tech Stack</h2>
       <div class="cards">
-        <article class="card"><h3>Frontend</h3><p>Semantic HTML, modern CSS, and vanilla JavaScript.</p></article>
-        <article class="card"><h3>Backend</h3><p>Node.js + Express API for extraction and summarization workflows.</p></article>
-        <article class="card"><h3>AI</h3><p>Hugging Face inference endpoint using BART-large-CNN summarization.</p></article>
+        <article class="card hover-lift"><h3>Frontend</h3><p>Semantic HTML, responsive CSS, and vanilla JavaScript interactions.</p></article>
+        <article class="card hover-lift"><h3>Backend</h3><p>Node.js + Express API for extraction, parsing, and summarization routing.</p></article>
+        <article class="card hover-lift"><h3>AI Model</h3><p>Hugging Face inference using BART-large-CNN for concise abstractive summaries.</p></article>
       </div>
     </section>
 
     <section id="try-now" class="section container reveal">
       <h2>Try Now</h2>
-      <p class="subtle">Choose one input mode, review extracted text, and generate your summary.</p>
+      <p class="subtle">Choose one input mode and click <strong>Generate Summary</strong>. No extra steps.</p>
 
-      <div class="input-tabs" role="tablist" aria-label="Input source">
-        <button class="tab active" data-tab="manual" type="button">Manual Text</button>
-        <button class="tab" data-tab="url" type="button">Webpage URL</button>
-        <button class="tab" data-tab="file" type="button">Upload File</button>
-      </div>
+      <div class="workspace">
+        <div class="input-zone glass hover-lift">
+          <div class="input-tabs" role="tablist" aria-label="Input source">
+            <button class="tab active" data-tab="manual" type="button">Manual Text</button>
+            <button class="tab" data-tab="url" type="button">Webpage URL</button>
+            <button class="tab" data-tab="file" type="button">Upload File</button>
+          </div>
 
-      <div class="panel" id="panel-manual">
-        <label for="manualText">Paste content</label>
-        <textarea id="manualText" placeholder="Paste text here (min 100 chars)..."></textarea>
-      </div>
+          <div class="panel" id="panel-manual">
+            <label for="manualText">Paste content</label>
+            <textarea id="manualText" placeholder="Paste text here (min 100 chars)..."></textarea>
+          </div>
 
-      <div class="panel hidden" id="panel-url">
-        <label for="urlInput">Webpage URL</label>
-        <div class="row">
-          <input id="urlInput" type="url" placeholder="https://example.com/article" />
-          <button id="fetchUrlBtn" type="button">Extract</button>
+          <div class="panel hidden" id="panel-url">
+            <label for="urlInput">Webpage URL</label>
+            <input id="urlInput" type="url" placeholder="https://en.wikipedia.org/wiki/Natural_language_processing" />
+          </div>
+
+          <div class="panel hidden" id="panel-file">
+            <label for="fileInput">Upload file (.txt, .pdf, .doc, .docx)</label>
+            <input id="fileInput" type="file" accept=".txt,.pdf,.doc,.docx" />
+          </div>
+
+          <div class="row wrap">
+            <button id="summarizeBtn" type="button" class="accent">Generate Summary</button>
+          </div>
+          <p id="status" class="status" aria-live="polite"></p>
         </div>
-      </div>
 
-      <div class="panel hidden" id="panel-file">
-        <label for="fileInput">Upload file (.txt, .pdf, .doc, .docx)</label>
-        <div class="row">
-          <input id="fileInput" type="file" accept=".txt,.pdf,.doc,.docx" />
-          <button id="extractFileBtn" type="button">Extract</button>
-        </div>
-      </div>
+        <aside class="result-zone glass hover-lift">
+          <div class="summary-head">
+            <h3>Summary</h3>
+            <div class="download-menu-wrap">
+              <button id="downloadToggle" class="download-toggle" type="button">Download ▾</button>
+              <div id="downloadMenu" class="download-menu hidden">
+                <button id="downloadTxtBtn" type="button">Download .txt</button>
+                <button id="downloadPdfBtn" type="button">Download .pdf</button>
+              </div>
+            </div>
+          </div>
 
-      <label for="inputText">Prepared text (editable before summarizing)</label>
-      <textarea id="inputText" placeholder="Your extracted or pasted text appears here..."></textarea>
+          <div id="loading" class="loading hidden" aria-live="polite">
+            <span class="spinner"></span>
+            <span>Generating summary...</span>
+          </div>
 
-      <div class="row wrap">
-        <button id="summarizeBtn" type="button" class="accent">Generate Summary</button>
-        <button id="downloadTxtBtn" type="button">Download .txt</button>
-        <button id="downloadPdfBtn" type="button">Download .pdf</button>
-      </div>
+          <p id="summary">Your generated summary will appear here.</p>
 
-      <p id="status" class="status" aria-live="polite"></p>
+          <h4>Summary Metrics</h4>
+          <div id="metrics">No metrics yet.</div>
 
-      <div class="results">
-        <h3>Summary</h3>
-        <p id="summary"></p>
+          <h4>Keywords</h4>
+          <p id="keywords">—</p>
 
-        <h3>Summary Metrics</h3>
-        <div id="metrics"></div>
-
-        <h3>Keywords</h3>
-        <p id="keywords">—</p>
-
-        <h3>Important Points</h3>
-        <ul id="points"></ul>
+          <h4>Important Points</h4>
+          <ul id="points"><li>No key points yet.</li></ul>
+        </aside>
       </div>
     </section>
 
-    <section id="contact" class="section container reveal">
+    <section id="contact" class="section container glass reveal hover-lift">
       <h2>Contact</h2>
-      <p>
-        This project is built as an educational full-stack mini application.
-        You can extend it with stronger file parsers, keyword extraction, and multilingual summarization.
-      </p>
+      <p>This project was developed as a B.Tech mini project under the AIWOCS team.</p>
+      <p>Email: <a href="mailto:sistadithyan@gmail.com">sistadithyan@gmail.com</a></p>
+      <p>GitHub: <a href="https://github.com/AdithyanVN" target="_blank" rel="noopener noreferrer">https://github.com/AdithyanVN</a></p>
     </section>
   </main>
 
-  <footer class="footer">© <span id="year"></span> Summarify</footer>
+  <footer class="footer">© 2026 AIWOCS team</footer>
 
   <script src="app.js"></script>
 </body>

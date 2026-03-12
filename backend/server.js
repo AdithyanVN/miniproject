@@ -5,7 +5,6 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 
-// Resolve directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -16,9 +15,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
-
-// Serve frontend assets
+app.use(express.json({ limit: "12mb" }));
 app.use(express.static(path.join(__dirname, "../frontend")));
 
 app.get("/", (req, res) => {
@@ -30,78 +27,109 @@ function stripHtmlToText(html) {
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/\s+/g, " ")
     .trim();
 }
 
+function normalizeUrl(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return null;
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    return new URL(withProtocol).toString();
+  } catch {
+    return null;
+  }
+}
+
 function extractTextFromUploadedFile(fileName, base64Content) {
   const extension = (path.extname(fileName || "") || "").toLowerCase();
   const buffer = Buffer.from(base64Content || "", "base64");
 
-  // Full fidelity text extraction is straightforward for plain text.
-  if (extension === ".txt" || extension === ".md" || extension === ".csv") {
+  if ([".txt", ".md", ".csv"].includes(extension)) {
     return buffer.toString("utf8").replace(/\s+/g, " ").trim();
   }
 
-  // Basic fallback extraction for binary containers (.pdf/.doc/.docx):
-  // keeps readable printable runs so users can still try summarization.
-  // For production-quality parsing, plug in dedicated parsers.
   if ([".pdf", ".doc", ".docx"].includes(extension)) {
-    const latin = buffer.toString("latin1");
-    const candidates = latin
-      .replace(/[^\x20-\x7E\n\r\t]/g, " ")
+    return buffer
+      .toString("latin1")
+      .replace(/[^\x20-\x7E\t]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-
-    return candidates;
   }
 
   throw new Error("Unsupported file type. Please upload .txt, .pdf, .doc, or .docx.");
 }
 
-// Extract text from a webpage URL
+function extractKeywords(text, maxCount = 8) {
+  const stopwords = new Set([
+    "the", "is", "in", "and", "to", "of", "a", "for", "on", "with", "as", "by", "an", "be", "are", "this", "that", "it", "from", "or", "at", "was", "were", "has", "have", "had", "not", "but", "into", "their", "they", "them", "its", "can", "will", "would", "should", "about", "over", "under", "than", "also"
+  ]);
+
+  const freq = {};
+  (text.toLowerCase().match(/\b[a-z]{4,}\b/g) || []).forEach(word => {
+    if (!stopwords.has(word)) {
+      freq[word] = (freq[word] || 0) + 1;
+    }
+  });
+
+  return Object.entries(freq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, maxCount)
+    .map(([word]) => word);
+}
+
+async function fetchPageTextFromUrl(url) {
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: {
+      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch the provided URL.");
+  }
+
+  const html = await response.text();
+  return stripHtmlToText(html);
+}
+
 app.post("/extract-url", async (req, res) => {
   try {
-    const { url } = req.body;
-
-    if (!url) {
-      return res.status(400).json({ error: "URL is required." });
+    const normalizedUrl = normalizeUrl(req.body?.url);
+    if (!normalizedUrl) {
+      return res.status(400).json({ error: "Please provide a valid URL." });
     }
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      return res.status(400).json({ error: "Failed to fetch the provided URL." });
-    }
-
-    const html = await response.text();
-    const text = stripHtmlToText(html);
-
+    const text = await fetchPageTextFromUrl(normalizedUrl);
     if (!text || text.length < 100) {
       return res.status(400).json({ error: "Unable to extract enough readable text from this URL." });
     }
 
     res.json({ text });
   } catch (error) {
-    res.status(500).json({ error: "Failed to extract text from webpage." });
+    res.status(500).json({ error: error.message || "Failed to extract text from webpage." });
   }
 });
 
-// Extract text from uploaded file content
 app.post("/extract-file", (req, res) => {
   try {
     const { fileName, base64Content } = req.body;
-
     if (!fileName || !base64Content) {
       return res.status(400).json({ error: "fileName and base64Content are required." });
     }
 
     const text = extractTextFromUploadedFile(fileName, base64Content);
-
     if (!text || text.length < 60) {
       return res.status(400).json({
         error: "Could not extract enough readable text from this file. Try .txt or paste text manually."
@@ -187,11 +215,13 @@ app.post("/summarize", async (req, res) => {
     const points = summary
       .split(/(?<=\.)\s+/)
       .map(s => s.trim())
-      .filter(s => s.length > 25);
+      .filter(s => s.length > 20);
+
+    const keywords = extractKeywords(summary.length > 150 ? summary : text, 8);
 
     res.json({
       summary,
-      keywords: [],
+      keywords,
       points,
       metrics: {
         originalWordCount,
@@ -213,30 +243,21 @@ app.post("/summarize", async (req, res) => {
   }
 });
 
-// Backward-compatible alias for older frontend clients
 app.post("/scrape", async (req, res) => {
   try {
-    const { url } = req.body;
-
-    if (!url) {
-      return res.status(400).json({ error: "URL is required." });
+    const normalizedUrl = normalizeUrl(req.body?.url);
+    if (!normalizedUrl) {
+      return res.status(400).json({ error: "Please provide a valid URL." });
     }
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      return res.status(400).json({ error: "Failed to fetch the provided URL." });
-    }
-
-    const html = await response.text();
-    const text = stripHtmlToText(html);
-
+    const text = await fetchPageTextFromUrl(normalizedUrl);
     if (!text || text.length < 100) {
       return res.status(400).json({ error: "Unable to extract enough readable text from this URL." });
     }
 
     res.json({ text });
   } catch (error) {
-    res.status(500).json({ error: "Failed to scrape webpage." });
+    res.status(500).json({ error: error.message || "Failed to scrape webpage." });
   }
 });
 

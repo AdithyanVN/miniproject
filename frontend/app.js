@@ -4,45 +4,60 @@ const urlPanel = document.getElementById('panel-url');
 const filePanel = document.getElementById('panel-file');
 
 const manualTextEl = document.getElementById('manualText');
-const inputTextEl = document.getElementById('inputText');
 const urlInputEl = document.getElementById('urlInput');
 const fileInputEl = document.getElementById('fileInput');
 const statusEl = document.getElementById('status');
+const loadingEl = document.getElementById('loading');
 
 const summaryEl = document.getElementById('summary');
 const keywordsEl = document.getElementById('keywords');
 const pointsEl = document.getElementById('points');
 const metricsEl = document.getElementById('metrics');
 
-const fetchUrlBtn = document.getElementById('fetchUrlBtn');
-const extractFileBtn = document.getElementById('extractFileBtn');
 const summarizeBtn = document.getElementById('summarizeBtn');
+const downloadToggle = document.getElementById('downloadToggle');
+const downloadMenu = document.getElementById('downloadMenu');
 const downloadTxtBtn = document.getElementById('downloadTxtBtn');
 const downloadPdfBtn = document.getElementById('downloadPdfBtn');
 
-document.getElementById('year').textContent = new Date().getFullYear();
-
+let activeTab = 'manual';
 let latestSummary = '';
 
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
-  statusEl.style.color = isError ? '#ff9ea0' : '#8bf4c5';
+  statusEl.style.color = isError ? '#ff9ea0' : '#8bf5c9';
+}
+
+function showLoading(show) {
+  loadingEl.classList.toggle('hidden', !show);
+}
+
+function resetResults() {
+  summaryEl.textContent = 'Your generated summary will appear here.';
+  keywordsEl.textContent = '—';
+  pointsEl.innerHTML = '<li>No key points yet.</li>';
+  metricsEl.textContent = 'No metrics yet.';
+  latestSummary = '';
 }
 
 function activateTab(tabName) {
+  activeTab = tabName;
   tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabName));
   manualPanel.classList.toggle('hidden', tabName !== 'manual');
   urlPanel.classList.toggle('hidden', tabName !== 'url');
   filePanel.classList.toggle('hidden', tabName !== 'file');
+  setStatus('');
 }
 
-tabs.forEach(btn => {
-  btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+tabs.forEach(btn => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
+
+downloadToggle.addEventListener('click', () => {
+  downloadMenu.classList.toggle('hidden');
 });
 
-manualTextEl.addEventListener('input', () => {
-  if (manualTextEl.value.trim().length > 0) {
-    inputTextEl.value = manualTextEl.value;
+document.addEventListener('click', event => {
+  if (!downloadToggle.contains(event.target) && !downloadMenu.contains(event.target)) {
+    downloadMenu.classList.add('hidden');
   }
 });
 
@@ -52,6 +67,7 @@ async function fetchJson(url, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
+
   const data = await response.json();
   if (!response.ok) {
     throw new Error(data.error || 'Request failed.');
@@ -59,61 +75,69 @@ async function fetchJson(url, body) {
   return data;
 }
 
-fetchUrlBtn.addEventListener('click', async () => {
-  const url = urlInputEl.value.trim();
-  if (!url) return setStatus('Please enter a URL first.', true);
-
-  try {
-    setStatus('Extracting text from webpage...');
-    const data = await fetchJson('/extract-url', { url });
-    inputTextEl.value = data.text;
-    setStatus('Webpage text extracted. You can now summarize it.');
-  } catch (error) {
-    setStatus(error.message, true);
+async function getInputTextBySource() {
+  if (activeTab === 'manual') {
+    const text = manualTextEl.value.trim();
+    if (!text || text.length < 100) {
+      throw new Error('Please paste at least 100 characters.');
+    }
+    return text;
   }
-});
 
-extractFileBtn.addEventListener('click', async () => {
-  const file = fileInputEl.files?.[0];
-  if (!file) return setStatus('Please select a file first.', true);
+  if (activeTab === 'url') {
+    const url = urlInputEl.value.trim();
+    if (!url) {
+      throw new Error('Please provide a webpage URL.');
+    }
+    setStatus('Extracting text from URL...');
+    const extracted = await fetchJson('/extract-url', { url });
+    if (!extracted.text || extracted.text.length < 100) {
+      throw new Error('Could not extract enough text from this URL.');
+    }
+    return extracted.text;
+  }
 
-  try {
+  if (activeTab === 'file') {
+    const file = fileInputEl.files?.[0];
+    if (!file) {
+      throw new Error('Please choose a file first.');
+    }
+
     setStatus('Reading file and extracting text...');
     const arrayBuffer = await file.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
 
-    // Chunk-safe base64 conversion for browser environments.
     let binary = '';
     const chunkSize = 0x8000;
     for (let i = 0; i < bytes.length; i += chunkSize) {
-      const sub = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode(...sub);
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
     }
 
     const base64Content = btoa(binary);
-    const data = await fetchJson('/extract-file', {
+    const extracted = await fetchJson('/extract-file', {
       fileName: file.name,
       base64Content
     });
 
-    inputTextEl.value = data.text;
-    setStatus('File text extracted. You can now summarize it.');
-  } catch (error) {
-    setStatus(error.message, true);
+    if (!extracted.text || extracted.text.length < 100) {
+      throw new Error('Could not extract enough text from this file.');
+    }
+
+    return extracted.text;
   }
-});
+
+  throw new Error('Invalid input mode selected.');
+}
 
 summarizeBtn.addEventListener('click', async () => {
-  const text = inputTextEl.value.trim();
-  if (!text || text.length < 100) {
-    return setStatus('Please provide at least 100 characters to summarize.', true);
-  }
-
   try {
+    resetResults();
+    showLoading(true);
+
+    const text = await getInputTextBySource();
     setStatus('Generating AI summary...');
 
     const data = await fetchJson('/summarize', { text });
-
     latestSummary = data.summary || '';
     summaryEl.textContent = latestSummary || 'No summary generated.';
 
@@ -129,9 +153,7 @@ summarizeBtn.addEventListener('click', async () => {
         pointsEl.appendChild(li);
       });
     } else {
-      const li = document.createElement('li');
-      li.textContent = 'No key points extracted.';
-      pointsEl.appendChild(li);
+      pointsEl.innerHTML = '<li>No key points extracted.</li>';
     }
 
     if (data.metrics) {
@@ -143,9 +165,11 @@ summarizeBtn.addEventListener('click', async () => {
       `;
     }
 
-    setStatus('Summary ready. You can download it as TXT or PDF.');
+    setStatus('Summary ready. Use Download to export as TXT or PDF.');
   } catch (error) {
     setStatus(error.message, true);
+  } finally {
+    showLoading(false);
   }
 });
 
@@ -165,6 +189,7 @@ downloadTxtBtn.addEventListener('click', () => {
   if (!latestSummary) return setStatus('Generate a summary before downloading.', true);
   downloadBlob('summary.txt', latestSummary, 'text/plain;charset=utf-8');
   setStatus('Downloaded summary.txt');
+  downloadMenu.classList.add('hidden');
 });
 
 function escapePdfText(text) {
@@ -205,7 +230,7 @@ function buildSimplePdf(text) {
 
 downloadPdfBtn.addEventListener('click', () => {
   if (!latestSummary) return setStatus('Generate a summary before downloading.', true);
-  const pdfBlob = buildSimplePdf(latestSummary);
-  downloadBlob('summary.pdf', pdfBlob, 'application/pdf');
+  downloadBlob('summary.pdf', buildSimplePdf(latestSummary), 'application/pdf');
   setStatus('Downloaded summary.pdf');
+  downloadMenu.classList.add('hidden');
 });
