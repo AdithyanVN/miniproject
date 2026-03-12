@@ -58,6 +58,70 @@ Summarify is a browser-based summarization app that helps users condense long co
 4. Open `http://localhost:3000`
 
 ## Notes
+- Long URL/file/manual inputs are automatically chunked server-side before AI summarization, with overflow backoff retries for very large sections, to avoid model context errors (e.g., "index out of range in self").
+- URL extraction works better for public article pages and may fail on heavily protected websites.
+- `.txt` extraction is most accurate in this version.
+- `.pdf/.doc/.docx` use lightweight fallback extraction and can be improved later with dedicated parser libraries.
+
+## Resolving PR Conflicts (Recommended Workflow)
+If GitHub shows **Resolve conflicts** for this PR, avoid blindly clicking **Accept incoming** for every block.
+
+### Quick rule
+- **Accept current**: keep this branch’s AIWOCS redesign behavior.
+- **Accept incoming**: only when the target branch has a newer fix you definitely need.
+- **Manual combine**: preferred for most conflicts in this project.
+
+### File-by-file guidance
+- `frontend/index.html` + `frontend/app.js` + `frontend/styles.css`
+  - Resolve these together as one UI system.
+  - Keep matching IDs/classes between HTML and JS (`manualText`, `urlInput`, `fileInput`, `summary`, `keywords`, `points`, `metrics`, `downloadMenu`).
+  - Keep the current two-panel Try Now layout and download dropdown behavior.
+
+- `backend/server.js`
+  - Keep helper functions: `normalizeUrl`, `stripHtmlToText`, `extractTextFromUploadedFile`, `extractKeywords`.
+  - Keep routes: `POST /extract-url`, `POST /extract-file`, `POST /summarize`, and compatibility `POST /scrape`.
+  - Ensure response field naming stays consistent with frontend (`withinRecommendedLength`, `keywords`, `points`).
+
+- `README.md`
+  - Prefer manual text merge to preserve project branding (`AIWOCS`) and setup instructions.
+
+### Safe local flow
+```bash
+git fetch origin
+git checkout work
+git merge origin/main
+# resolve files, then
+git add README.md backend/server.js frontend/index.html frontend/app.js frontend/styles.css
+npm run check
+git commit -m "Resolve merge conflicts with main"
+git push
+```
+
+
+## Project Structure
+- `backend/server.js` — extraction endpoints, summarization route, metrics/keywords generation
+- `backend/summarizer.js` — optional local extractive utility (not currently wired)
+- `frontend/index.html` — multi-section UI and app layout
+- `frontend/styles.css` — visual design, hover effects, animations
+- `frontend/app.js` — source-tab logic, summarize workflow, and export actions
+
+## Setup
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Create `backend/.env`:
+   ```env
+   HF_API_KEY=your_huggingface_token
+   PORT=3000
+   ```
+3. Start the app:
+   ```bash
+   npm start
+   ```
+4. Open `http://localhost:3000`
+
+## Notes
 - Long URL/file/manual inputs are automatically chunked server-side before AI summarization to avoid model context overflow errors (e.g., "index out of range in self").
 - URL extraction works better for public article pages and may fail on heavily protected websites.
 - `.txt` extraction is most accurate in this version.

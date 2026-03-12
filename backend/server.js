@@ -14,8 +14,9 @@ dotenv.config({ path: path.join(__dirname, ".env") });
 const app = express();
 const PORT = process.env.PORT || 3000;
 const HF_MODEL_URL = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-cnn";
-const HF_MAX_CHUNK_WORDS = 700;
+const HF_MAX_CHUNK_WORDS = 280;
 const HF_REDUCTION_PASSES = 3;
+const HF_MIN_CHUNK_WORDS = 80;
 
 app.use(cors());
 app.use(express.json({ limit: "12mb" }));
@@ -125,8 +126,8 @@ async function summarizeWithHuggingFace(inputText) {
 
   if (!hfResponse.ok || result?.error) {
     const modelError = result?.error || "HuggingFace inference error.";
-    if (/index out of range/i.test(modelError)) {
-      throw new Error("Input is too long for a single model pass. Please try a shorter text or URL.");
+    if (/index out of range|input is too long|max(?:imum)? (?:length|tokens)|token/i.test(modelError)) {
+      throw new Error(`MODEL_OVERFLOW:${modelError}`);
     }
     throw new Error(modelError);
   }
@@ -142,6 +143,37 @@ async function summarizeWithHuggingFace(inputText) {
   return summaryText.trim();
 }
 
+function splitChunkInHalf(chunkText) {
+  const words = chunkText.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= HF_MIN_CHUNK_WORDS) return [chunkText];
+
+  const middle = Math.floor(words.length / 2);
+  const first = words.slice(0, middle).join(" ");
+  const second = words.slice(middle).join(" ");
+  return [first, second].filter(Boolean);
+}
+
+async function summarizeChunkWithBackoff(chunkText) {
+  try {
+    return await summarizeWithHuggingFace(chunkText);
+  } catch (error) {
+    if (!String(error.message || "").startsWith("MODEL_OVERFLOW:")) {
+      throw error;
+    }
+
+    const subChunks = splitChunkInHalf(chunkText);
+    if (subChunks.length === 1 || subChunks[0] === chunkText) {
+      throw new Error("Input is too long for model context limits. Try a shorter section.");
+    }
+
+    const summaries = [];
+    for (const subChunk of subChunks) {
+      summaries.push(await summarizeChunkWithBackoff(subChunk));
+    }
+    return summaries.join(" ");
+  }
+}
+
 async function summarizeLongText(text) {
   let workingText = text;
 
@@ -154,15 +186,18 @@ async function summarizeLongText(text) {
 
     const chunkSummaries = [];
     for (const chunk of chunks) {
-      const summary = await summarizeWithHuggingFace(chunk);
+      const summary = await summarizeChunkWithBackoff(chunk);
       chunkSummaries.push(summary);
     }
 
     workingText = chunkSummaries.join(" ");
   }
 
-  const fallbackChunks = chunkTextByWords(workingText, HF_MAX_CHUNK_WORDS);
-  return fallbackChunks[0];
+  const finalChunks = chunkTextByWords(workingText, HF_MAX_CHUNK_WORDS);
+  if (finalChunks.length === 1) {
+    return summarizeChunkWithBackoff(finalChunks[0]);
+  }
+  return summarizeChunkWithBackoff(finalChunks.join(" "));
 }
 
 async function fetchPageTextFromUrl(url) {
@@ -285,8 +320,15 @@ app.post("/summarize", async (req, res) => {
     });
   } catch (error) {
     console.error("Server Error:", error.message);
+    const msg = String(error.message || "");
+    if (msg.startsWith("MODEL_OVERFLOW:")) {
+      return res.status(400).json({
+        error: "Input is too large for one AI pass. The server attempted chunking, but this content still exceeded model context. Please try a smaller section."
+      });
+    }
+
     res.status(500).json({
-      error: error.message || "AI summarization failed. Ensure HF_API_KEY is configured and network is available."
+      error: msg || "AI summarization failed. Ensure HF_API_KEY is configured and network is available."
     });
   }
 });
