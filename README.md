@@ -13,6 +13,18 @@ It helps users turn long content into concise insights quickly.
   - keywords
   - important points
   - word/sentence metrics + compression ratio + one-third rule check
+# Summarify — AI Web Content Summarizer
+
+Summarify is a browser-based summarization app that helps users condense long content into concise insights.
+
+## Features
+- AI-powered abstractive summarization via Hugging Face (BART-large-CNN)
+- Multiple input modes:
+  - Paste text manually
+  - Extract content from webpage URL
+  - Upload files (`.txt`, `.pdf`, `.doc`, `.docx`)
+- Summary quality metrics (word count, sentence count, compression ratio, one-third-rule check)
+- Important point extraction from generated summary
 - Download summary as:
   - `.txt`
   - `.pdf`
@@ -28,6 +40,14 @@ It helps users turn long content into concise insights quickly.
 - `frontend/index.html` — multi-section UI and app layout
 - `frontend/styles.css` — visual design, hover effects, animations
 - `frontend/app.js` — source-tab logic, summarize workflow, and export actions
+- AI Model API: Hugging Face Inference Router
+
+## Project Structure
+- `backend/server.js` — Express server, extraction endpoints, summarization route
+- `backend/summarizer.js` — local extractive summarizer utility (not currently wired to API)
+- `frontend/index.html` — landing page + app UI sections
+- `frontend/styles.css` — professional UI styling and animations
+- `frontend/app.js` — tab logic, extraction calls, summarization, and download actions
 
 ## Setup
 1. Install dependencies:
@@ -40,6 +60,7 @@ It helps users turn long content into concise insights quickly.
    PORT=3000
    ```
 3. Start the app:
+3. Start app:
    ```bash
    npm start
    ```
@@ -90,3 +111,6 @@ npm run check
 npm start
 ```
 Open `http://localhost:3000` and verify manual/url/file input mode, summary generation path, and download dropdown.
+- URL extraction strips HTML tags and script/style content before summarization.
+- `.txt` extraction is most accurate.
+- `.pdf/.doc/.docx` extraction uses lightweight fallback parsing in this version; richer parsing can be added later with dedicated libraries.
