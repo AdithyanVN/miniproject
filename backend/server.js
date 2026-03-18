@@ -18,8 +18,7 @@ const HF_MODEL_URL = "https://router.huggingface.co/hf-inference/models/facebook
 const HF_MAX_CHUNK_WORDS = 280;
 const HF_REDUCTION_PASSES = 3;
 const HF_MIN_CHUNK_WORDS = 80;
-const URL_FETCH_TIMEOUT_MS = 12000;
-const HF_REQUEST_TIMEOUT_MS = 45000;
+const FETCH_TIMEOUT_MS = 12000;
 const MAX_SOURCE_WORDS = 1800;
 const MAX_URL_WORDS = 1400;
 const ARTICLE_CONTAINER_PATTERN = /<(article|main|section)[^>]*>([\s\S]*?)<\/\1>/gi;
@@ -168,9 +167,7 @@ function shouldRetryHuggingFace(errorMessage) {
 }
 
 async function summarizeWithHuggingFace(inputText) {
-  const maxRetries = 3;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+  for (let attempt = 1; attempt <= HF_MAX_RETRIES; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), HF_REQUEST_TIMEOUT_MS);
 
@@ -206,7 +203,7 @@ async function summarizeWithHuggingFace(inputText) {
           throw new Error(`MODEL_OVERFLOW:${modelError}`);
         }
 
-        if (shouldRetryHuggingFace(modelError) && attempt < maxRetries) {
+        if (shouldRetryHuggingFace(modelError) && attempt < HF_MAX_RETRIES) {
           const retryDelayMs = Math.min(
             Math.max(Math.ceil(Number(result?.estimated_time || 5) * 1000), 3000),
             15000
@@ -233,7 +230,7 @@ async function summarizeWithHuggingFace(inputText) {
       }
 
       if (error.name === "AbortError") {
-        if (attempt < maxRetries) {
+        if (attempt < HF_MAX_RETRIES) {
           await sleep(2000 * attempt);
           continue;
         }
@@ -244,7 +241,7 @@ async function summarizeWithHuggingFace(inputText) {
         throw new Error("Could not reach the AI provider. Check network access or try again.");
       }
 
-      if (shouldRetryHuggingFace(String(error.message || "")) && attempt < maxRetries) {
+      if (shouldRetryHuggingFace(String(error.message || "")) && attempt < HF_MAX_RETRIES) {
         await sleep(2000 * attempt);
         continue;
       }
@@ -317,7 +314,7 @@ async function summarizeLongText(text) {
 
 async function fetchPageTextFromUrl(url) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, {
