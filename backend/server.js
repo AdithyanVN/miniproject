@@ -17,6 +17,12 @@ const HF_MODEL_URL = "https://router.huggingface.co/hf-inference/models/facebook
 const HF_MAX_CHUNK_WORDS = 280;
 const HF_REDUCTION_PASSES = 3;
 const HF_MIN_CHUNK_WORDS = 80;
+const FETCH_TIMEOUT_MS = 12000;
+const MAX_SOURCE_WORDS = 1800;
+const MAX_URL_WORDS = 1400;
+const ARTICLE_CONTAINER_PATTERN = /<(article|main|section)[^>]*>([\s\S]*?)<\/\1>/gi;
+const PARAGRAPH_PATTERN = /<(p|h1|h2|h3|li|blockquote)[^>]*>([\s\S]*?)<\/\1>/gi;
+const BODY_PATTERN = /<body[^>]*>([\s\S]*?)<\/body>/i;
 
 app.use(cors());
 app.use(express.json({ limit: "12mb" }));
@@ -26,21 +32,67 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "../frontend/index.html"));
 });
 
-function stripHtmlToText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+function decodeHtmlEntities(text) {
+  return text
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function stripHtmlToText(html) {
+  return decodeHtmlEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+  )
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function truncateWords(text, maxWords) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return `${words.slice(0, maxWords).join(" ")}…`;
+}
+
+function collectSegments(html, pattern) {
+  const segments = [];
+  let match;
+  while ((match = pattern.exec(html)) !== null) {
+    const candidate = stripHtmlToText(match[2] || match[1] || "");
+    if (candidate.length >= 120) {
+      segments.push(candidate);
+    }
+  }
+  pattern.lastIndex = 0;
+  return segments;
+}
+
+function extractLikelyArticleText(html) {
+  const prioritizedContainers = collectSegments(html, ARTICLE_CONTAINER_PATTERN);
+  const bodyMatch = html.match(BODY_PATTERN);
+  const bodyHtml = bodyMatch?.[1] || html;
+  const paragraphSegments = collectSegments(bodyHtml, PARAGRAPH_PATTERN);
+
+  const preferredText = prioritizedContainers.join(" ").trim();
+  if (preferredText) {
+    return truncateWords(preferredText, MAX_URL_WORDS);
+  }
+
+  const paragraphText = paragraphSegments.join(" ").trim();
+  if (paragraphText) {
+    return truncateWords(paragraphText, MAX_URL_WORDS);
+  }
+
+  return truncateWords(stripHtmlToText(bodyHtml), MAX_URL_WORDS);
 }
 
 function normalizeUrl(input) {
@@ -59,15 +111,18 @@ function extractTextFromUploadedFile(fileName, base64Content) {
   const buffer = Buffer.from(base64Content || "", "base64");
 
   if ([".txt", ".md", ".csv"].includes(extension)) {
-    return buffer.toString("utf8").replace(/\s+/g, " ").trim();
+    return truncateWords(buffer.toString("utf8").replace(/\s+/g, " ").trim(), MAX_SOURCE_WORDS);
   }
 
   if ([".pdf", ".doc", ".docx"].includes(extension)) {
-    return buffer
-      .toString("latin1")
-      .replace(/[^\x20-\x7E\t]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    return truncateWords(
+      buffer
+        .toString("latin1")
+        .replace(/[^\x20-\x7E\t]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+      MAX_SOURCE_WORDS
+    );
   }
 
   throw new Error("Unsupported file type. Please upload .txt, .pdf, .doc, or .docx.");
@@ -103,44 +158,60 @@ function chunkTextByWords(text, maxWords = HF_MAX_CHUNK_WORDS) {
 }
 
 async function summarizeWithHuggingFace(inputText) {
-  const hfResponse = await fetch(HF_MODEL_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.HF_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      inputs: inputText,
-      parameters: {
-        max_length: 180,
-        min_length: 80,
-        do_sample: false,
-        length_penalty: 2.0,
-        repetition_penalty: 1.2,
-        early_stopping: true
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    const hfResponse = await fetch(HF_MODEL_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.HF_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        inputs: inputText,
+        parameters: {
+          max_length: 180,
+          min_length: 80,
+          do_sample: false,
+          length_penalty: 2.0,
+          repetition_penalty: 1.2,
+          early_stopping: true
+        }
+      }),
+      signal: controller.signal
+    });
+
+    const result = await hfResponse.json();
+
+    if (!hfResponse.ok || result?.error) {
+      const modelError = result?.error || "HuggingFace inference error.";
+      if (/index out of range|input is too long|max(?:imum)? (?:length|tokens)|token/i.test(modelError)) {
+        throw new Error(`MODEL_OVERFLOW:${modelError}`);
       }
-    })
-  });
-
-  const result = await hfResponse.json();
-
-  if (!hfResponse.ok || result?.error) {
-    const modelError = result?.error || "HuggingFace inference error.";
-    if (/index out of range|input is too long|max(?:imum)? (?:length|tokens)|token/i.test(modelError)) {
-      throw new Error(`MODEL_OVERFLOW:${modelError}`);
+      throw new Error(modelError);
     }
-    throw new Error(modelError);
+
+    const summaryText = Array.isArray(result)
+      ? result[0]?.summary_text
+      : result?.summary_text;
+
+    if (!summaryText) {
+      throw new Error("Invalid response format from HuggingFace.");
+    }
+
+    return summaryText.trim();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Summarization timed out while waiting for the AI provider.");
+    }
+    if (/failed, reason/i.test(String(error.message || ""))) {
+      throw new Error("Could not reach the AI provider. Check network access or try again.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const summaryText = Array.isArray(result)
-    ? result[0]?.summary_text
-    : result?.summary_text;
-
-  if (!summaryText) {
-    throw new Error("Invalid response format from HuggingFace.");
-  }
-
-  return summaryText.trim();
 }
 
 function splitChunkInHalf(chunkText) {
@@ -175,7 +246,7 @@ async function summarizeChunkWithBackoff(chunkText) {
 }
 
 async function summarizeLongText(text) {
-  let workingText = text;
+  let workingText = truncateWords(text, MAX_SOURCE_WORDS);
 
   for (let pass = 0; pass < HF_REDUCTION_PASSES; pass += 1) {
     const chunks = chunkTextByWords(workingText, HF_MAX_CHUNK_WORDS);
@@ -201,20 +272,36 @@ async function summarizeLongText(text) {
 }
 
 async function fetchPageTextFromUrl(url) {
-  const response = await fetch(url, {
-    redirect: "follow",
-    headers: {
-      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9"
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to fetch the provided URL.");
     }
-  });
 
-  if (!response.ok) {
-    throw new Error("Failed to fetch the provided URL.");
+    const html = await response.text();
+    return extractLikelyArticleText(html);
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Fetching the webpage timed out. Try a faster or less protected URL.");
+    }
+    if (/failed, reason/i.test(String(error.message || ""))) {
+      throw new Error("Could not fetch the webpage. The site may block bots or the server network may be unavailable.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const html = await response.text();
-  return stripHtmlToText(html);
 }
 
 app.post("/extract-url", async (req, res) => {
@@ -271,7 +358,7 @@ app.post("/summarize", async (req, res) => {
       });
     }
 
-    const cleanInputText = text.replace(/\s+/g, " ").trim();
+    const cleanInputText = truncateWords(text.replace(/\s+/g, " ").trim(), MAX_SOURCE_WORDS);
     const summary = await summarizeLongText(cleanInputText);
 
     const originalWordCount = cleanInputText.split(/\s+/).length;
