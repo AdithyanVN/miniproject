@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import { summarizeText as summarizeTextLocally } from "./summarizer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +18,14 @@ const HF_MODEL_URL = "https://router.huggingface.co/hf-inference/models/facebook
 const HF_MAX_CHUNK_WORDS = 280;
 const HF_REDUCTION_PASSES = 3;
 const HF_MIN_CHUNK_WORDS = 80;
+// Keep separate timeout budgets: webpage fetches should fail fast, while AI requests may need longer.
+const URL_FETCH_TIMEOUT_MS = 12000;
+const HF_REQUEST_TIMEOUT_MS = 45000;
+const MAX_SOURCE_WORDS = 1800;
+const MAX_URL_WORDS = 1400;
+const ARTICLE_CONTAINER_PATTERN = /<(article|main|section)[^>]*>([\s\S]*?)<\/\1>/gi;
+const PARAGRAPH_PATTERN = /<(p|h1|h2|h3|li|blockquote)[^>]*>([\s\S]*?)<\/\1>/gi;
+const BODY_PATTERN = /<body[^>]*>([\s\S]*?)<\/body>/i;
 
 app.use(cors());
 app.use(express.json({ limit: "12mb" }));
@@ -26,21 +35,67 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "../frontend/index.html"));
 });
 
-function stripHtmlToText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+function decodeHtmlEntities(text) {
+  return text
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function stripHtmlToText(html) {
+  return decodeHtmlEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+  )
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function truncateWords(text, maxWords) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return `${words.slice(0, maxWords).join(" ")}…`;
+}
+
+function collectSegments(html, pattern) {
+  const segments = [];
+  let match;
+  while ((match = pattern.exec(html)) !== null) {
+    const candidate = stripHtmlToText(match[2] || match[1] || "");
+    if (candidate.length >= 120) {
+      segments.push(candidate);
+    }
+  }
+  pattern.lastIndex = 0;
+  return segments;
+}
+
+function extractLikelyArticleText(html) {
+  const prioritizedContainers = collectSegments(html, ARTICLE_CONTAINER_PATTERN);
+  const bodyMatch = html.match(BODY_PATTERN);
+  const bodyHtml = bodyMatch?.[1] || html;
+  const paragraphSegments = collectSegments(bodyHtml, PARAGRAPH_PATTERN);
+
+  const preferredText = prioritizedContainers.join(" ").trim();
+  if (preferredText) {
+    return truncateWords(preferredText, MAX_URL_WORDS);
+  }
+
+  const paragraphText = paragraphSegments.join(" ").trim();
+  if (paragraphText) {
+    return truncateWords(paragraphText, MAX_URL_WORDS);
+  }
+
+  return truncateWords(stripHtmlToText(bodyHtml), MAX_URL_WORDS);
 }
 
 function normalizeUrl(input) {
@@ -59,15 +114,18 @@ function extractTextFromUploadedFile(fileName, base64Content) {
   const buffer = Buffer.from(base64Content || "", "base64");
 
   if ([".txt", ".md", ".csv"].includes(extension)) {
-    return buffer.toString("utf8").replace(/\s+/g, " ").trim();
+    return truncateWords(buffer.toString("utf8").replace(/\s+/g, " ").trim(), MAX_SOURCE_WORDS);
   }
 
   if ([".pdf", ".doc", ".docx"].includes(extension)) {
-    return buffer
-      .toString("latin1")
-      .replace(/[^\x20-\x7E\t]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    return truncateWords(
+      buffer
+        .toString("latin1")
+        .replace(/[^\x20-\x7E\t]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+      MAX_SOURCE_WORDS
+    );
   }
 
   throw new Error("Unsupported file type. Please upload .txt, .pdf, .doc, or .docx.");
@@ -102,45 +160,104 @@ function chunkTextByWords(text, maxWords = HF_MAX_CHUNK_WORDS) {
   return chunks;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function shouldRetryHuggingFace(errorMessage) {
+  return /loading|currently loading|503|temporarily unavailable|timed out while waiting/i.test(errorMessage);
+}
+
 async function summarizeWithHuggingFace(inputText) {
-  const hfResponse = await fetch(HF_MODEL_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.HF_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      inputs: inputText,
-      parameters: {
-        max_length: 180,
-        min_length: 80,
-        do_sample: false,
-        length_penalty: 2.0,
-        repetition_penalty: 1.2,
-        early_stopping: true
+  // Keep retries local here so merge resolutions do not depend on a shared constant getting carried across branches.
+  const maxRetries = 3;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HF_REQUEST_TIMEOUT_MS);
+
+    try {
+      const hfResponse = await fetch(HF_MODEL_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.HF_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          inputs: inputText,
+          parameters: {
+            max_length: 180,
+            min_length: 80,
+            do_sample: false,
+            length_penalty: 2.0,
+            repetition_penalty: 1.2,
+            early_stopping: true
+          },
+          options: {
+            wait_for_model: true
+          }
+        }),
+        signal: controller.signal
+      });
+
+      const result = await hfResponse.json();
+
+      if (!hfResponse.ok || result?.error) {
+        const modelError = result?.error || "HuggingFace inference error.";
+        if (/index out of range|input is too long|max(?:imum)? (?:length|tokens)|token/i.test(modelError)) {
+          throw new Error(`MODEL_OVERFLOW:${modelError}`);
+        }
+
+        if (shouldRetryHuggingFace(modelError) && attempt < maxRetries) {
+          const retryDelayMs = Math.min(
+            Math.max(Math.ceil(Number(result?.estimated_time || 5) * 1000), 3000),
+            15000
+          );
+          await sleep(retryDelayMs);
+          continue;
+        }
+
+        throw new Error(modelError);
       }
-    })
-  });
 
-  const result = await hfResponse.json();
+      const summaryText = Array.isArray(result)
+        ? result[0]?.summary_text
+        : result?.summary_text;
 
-  if (!hfResponse.ok || result?.error) {
-    const modelError = result?.error || "HuggingFace inference error.";
-    if (/index out of range|input is too long|max(?:imum)? (?:length|tokens)|token/i.test(modelError)) {
-      throw new Error(`MODEL_OVERFLOW:${modelError}`);
+      if (!summaryText) {
+        throw new Error("Invalid response format from HuggingFace.");
+      }
+
+      return summaryText.trim();
+    } catch (error) {
+      if (String(error.message || "").startsWith("MODEL_OVERFLOW:")) {
+        throw error;
+      }
+
+      if (error.name === "AbortError") {
+        if (attempt < maxRetries) {
+          await sleep(2000 * attempt);
+          continue;
+        }
+        throw new Error("Summarization timed out while waiting for the AI provider.");
+      }
+
+      if (/failed, reason/i.test(String(error.message || ""))) {
+        throw new Error("Could not reach the AI provider. Check network access or try again.");
+      }
+
+      if (shouldRetryHuggingFace(String(error.message || "")) && attempt < maxRetries) {
+        await sleep(2000 * attempt);
+        continue;
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    throw new Error(modelError);
   }
 
-  const summaryText = Array.isArray(result)
-    ? result[0]?.summary_text
-    : result?.summary_text;
-
-  if (!summaryText) {
-    throw new Error("Invalid response format from HuggingFace.");
-  }
-
-  return summaryText.trim();
+  throw new Error("Summarization timed out while waiting for the AI provider.");
 }
 
 function splitChunkInHalf(chunkText) {
@@ -175,7 +292,7 @@ async function summarizeChunkWithBackoff(chunkText) {
 }
 
 async function summarizeLongText(text) {
-  let workingText = text;
+  let workingText = truncateWords(text, MAX_SOURCE_WORDS);
 
   for (let pass = 0; pass < HF_REDUCTION_PASSES; pass += 1) {
     const chunks = chunkTextByWords(workingText, HF_MAX_CHUNK_WORDS);
@@ -201,20 +318,96 @@ async function summarizeLongText(text) {
 }
 
 async function fetchPageTextFromUrl(url) {
-  const response = await fetch(url, {
-    redirect: "follow",
-    headers: {
-      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9"
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error("Failed to fetch the provided URL.");
     }
-  });
 
-  if (!response.ok) {
-    throw new Error("Failed to fetch the provided URL.");
+    const html = await response.text();
+    return extractLikelyArticleText(html);
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Fetching the webpage timed out. Try a faster or less protected URL.");
+    }
+    if (/failed, reason/i.test(String(error.message || ""))) {
+      throw new Error("Could not fetch the webpage. The site may block bots or the server network may be unavailable.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
+}
 
-  const html = await response.text();
-  return stripHtmlToText(html);
+function buildSummaryPayload(summary, sourceText, mode) {
+  const normalizedSummary = String(summary || "").trim();
+  const cleanInputText = String(sourceText || "").trim();
+
+  const originalWordCount = cleanInputText.split(/\s+/).filter(Boolean).length;
+  const originalSentenceCount = cleanInputText
+    .split(/[.!?]+/)
+    .filter(s => s.trim().length > 0).length;
+
+  const summaryWordCount = normalizedSummary.split(/\s+/).filter(Boolean).length;
+  const summarySentenceCount = normalizedSummary
+    .split(/[.!?]+/)
+    .filter(s => s.trim().length > 0).length;
+
+  const compressionRatio = (
+    ((originalWordCount - summaryWordCount) / originalWordCount) * 100
+  ).toFixed(2);
+
+  const recommendedLengthPercentage = 33;
+  const actualLengthPercentage = (
+    (summaryWordCount / originalWordCount) * 100
+  ).toFixed(2);
+
+  const withinRecommendedLength = summaryWordCount <= originalWordCount / 3;
+
+  const points = normalizedSummary
+    .split(/(?<=\.)\s+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 20);
+
+  const keywords = extractKeywords(normalizedSummary.length > 150 ? normalizedSummary : cleanInputText, 8);
+
+  return {
+    summary: normalizedSummary,
+    keywords,
+    points,
+    metrics: {
+      originalWordCount,
+      originalSentenceCount,
+      summaryWordCount,
+      summarySentenceCount,
+      compressionRatio,
+      recommendedLengthPercentage,
+      actualLengthPercentage,
+      withinRecommendedLength
+    },
+    mode
+  };
+}
+
+function buildLocalFallbackPayload(text, reason) {
+  const fallback = summarizeTextLocally(text);
+  const summary = fallback.summary || fallback.points?.join(". ") || text.slice(0, 500);
+
+  return {
+    ...buildSummaryPayload(summary, text, "local-extractive-fallback"),
+    warning: reason
+  };
 }
 
 app.post("/extract-url", async (req, res) => {
@@ -265,59 +458,35 @@ app.post("/summarize", async (req, res) => {
       });
     }
 
+    const cleanInputText = truncateWords(text.replace(/\s+/g, " ").trim(), MAX_SOURCE_WORDS);
     if (!process.env.HF_API_KEY) {
-      return res.status(500).json({
-        error: "HF_API_KEY is missing on server. Please configure backend/.env."
-      });
+      return res.json(buildLocalFallbackPayload(
+        cleanInputText,
+        "HF_API_KEY is missing on server, so a local fallback summary was used."
+      ));
     }
 
-    const cleanInputText = text.replace(/\s+/g, " ").trim();
-    const summary = await summarizeLongText(cleanInputText);
+    try {
+      const summary = await summarizeLongText(cleanInputText);
+      return res.json(buildSummaryPayload(summary, cleanInputText, "ai-abstractive-online"));
+    } catch (error) {
+      const message = String(error.message || "");
+      if (message.startsWith("MODEL_OVERFLOW:")) {
+        throw error;
+      }
 
-    const originalWordCount = cleanInputText.split(/\s+/).length;
-    const originalSentenceCount = cleanInputText
-      .split(/[.!?]+/)
-      .filter(s => s.trim().length > 0).length;
+      if (
+        /timed out while waiting for the ai provider|could not reach the ai provider|loading|temporarily unavailable/i.test(message)
+      ) {
+        console.warn("Falling back to local summarizer:", message);
+        return res.json(buildLocalFallbackPayload(
+          cleanInputText,
+          `AI provider unavailable: ${message}`
+        ));
+      }
 
-    const summaryWordCount = summary.split(/\s+/).length;
-    const summarySentenceCount = summary
-      .split(/[.!?]+/)
-      .filter(s => s.trim().length > 0).length;
-
-    const compressionRatio = (
-      ((originalWordCount - summaryWordCount) / originalWordCount) * 100
-    ).toFixed(2);
-
-    const recommendedLengthPercentage = 33;
-    const actualLengthPercentage = (
-      (summaryWordCount / originalWordCount) * 100
-    ).toFixed(2);
-
-    const withinRecommendedLength = summaryWordCount <= originalWordCount / 3;
-
-    const points = summary
-      .split(/(?<=\.)\s+/)
-      .map(s => s.trim())
-      .filter(s => s.length > 20);
-
-    const keywords = extractKeywords(summary.length > 150 ? summary : cleanInputText, 8);
-
-    res.json({
-      summary,
-      keywords,
-      points,
-      metrics: {
-        originalWordCount,
-        originalSentenceCount,
-        summaryWordCount,
-        summarySentenceCount,
-        compressionRatio,
-        recommendedLengthPercentage,
-        actualLengthPercentage,
-        withinRecommendedLength
-      },
-      mode: "ai-abstractive-online"
-    });
+      throw error;
+    }
   } catch (error) {
     console.error("Server Error:", error.message);
     const msg = String(error.message || "");
