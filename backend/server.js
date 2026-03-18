@@ -18,9 +18,7 @@ const HF_MODEL_URL = "https://router.huggingface.co/hf-inference/models/facebook
 const HF_MAX_CHUNK_WORDS = 280;
 const HF_REDUCTION_PASSES = 3;
 const HF_MIN_CHUNK_WORDS = 80;
-const URL_FETCH_TIMEOUT_MS = 12000;
-const HF_REQUEST_TIMEOUT_MS = 45000;
-const HF_MAX_RETRIES = 3;
+const FETCH_TIMEOUT_MS = 12000;
 const MAX_SOURCE_WORDS = 1800;
 const MAX_URL_WORDS = 1400;
 const ARTICLE_CONTAINER_PATTERN = /<(article|main|section)[^>]*>([\s\S]*?)<\/\1>/gi;
@@ -316,7 +314,7 @@ async function summarizeLongText(text) {
 
 async function fetchPageTextFromUrl(url) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, {
