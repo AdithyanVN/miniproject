@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import { summarizeText as summarizeTextLocally } from "./summarizer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -157,61 +158,101 @@ function chunkTextByWords(text, maxWords = HF_MAX_CHUNK_WORDS) {
   return chunks;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function shouldRetryHuggingFace(errorMessage) {
+  return /loading|currently loading|503|temporarily unavailable|timed out while waiting/i.test(errorMessage);
+}
+
 async function summarizeWithHuggingFace(inputText) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  for (let attempt = 1; attempt <= HF_MAX_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HF_REQUEST_TIMEOUT_MS);
 
-  try {
-    const hfResponse = await fetch(HF_MODEL_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.HF_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        inputs: inputText,
-        parameters: {
-          max_length: 180,
-          min_length: 80,
-          do_sample: false,
-          length_penalty: 2.0,
-          repetition_penalty: 1.2,
-          early_stopping: true
+    try {
+      const hfResponse = await fetch(HF_MODEL_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.HF_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          inputs: inputText,
+          parameters: {
+            max_length: 180,
+            min_length: 80,
+            do_sample: false,
+            length_penalty: 2.0,
+            repetition_penalty: 1.2,
+            early_stopping: true
+          },
+          options: {
+            wait_for_model: true
+          }
+        }),
+        signal: controller.signal
+      });
+
+      const result = await hfResponse.json();
+
+      if (!hfResponse.ok || result?.error) {
+        const modelError = result?.error || "HuggingFace inference error.";
+        if (/index out of range|input is too long|max(?:imum)? (?:length|tokens)|token/i.test(modelError)) {
+          throw new Error(`MODEL_OVERFLOW:${modelError}`);
         }
-      }),
-      signal: controller.signal
-    });
 
-    const result = await hfResponse.json();
+        if (shouldRetryHuggingFace(modelError) && attempt < HF_MAX_RETRIES) {
+          const retryDelayMs = Math.min(
+            Math.max(Math.ceil(Number(result?.estimated_time || 5) * 1000), 3000),
+            15000
+          );
+          await sleep(retryDelayMs);
+          continue;
+        }
 
-    if (!hfResponse.ok || result?.error) {
-      const modelError = result?.error || "HuggingFace inference error.";
-      if (/index out of range|input is too long|max(?:imum)? (?:length|tokens)|token/i.test(modelError)) {
-        throw new Error(`MODEL_OVERFLOW:${modelError}`);
+        throw new Error(modelError);
       }
-      throw new Error(modelError);
-    }
 
-    const summaryText = Array.isArray(result)
-      ? result[0]?.summary_text
-      : result?.summary_text;
+      const summaryText = Array.isArray(result)
+        ? result[0]?.summary_text
+        : result?.summary_text;
 
-    if (!summaryText) {
-      throw new Error("Invalid response format from HuggingFace.");
-    }
+      if (!summaryText) {
+        throw new Error("Invalid response format from HuggingFace.");
+      }
 
-    return summaryText.trim();
-  } catch (error) {
-    if (error.name === "AbortError") {
-      throw new Error("Summarization timed out while waiting for the AI provider.");
+      return summaryText.trim();
+    } catch (error) {
+      if (String(error.message || "").startsWith("MODEL_OVERFLOW:")) {
+        throw error;
+      }
+
+      if (error.name === "AbortError") {
+        if (attempt < HF_MAX_RETRIES) {
+          await sleep(2000 * attempt);
+          continue;
+        }
+        throw new Error("Summarization timed out while waiting for the AI provider.");
+      }
+
+      if (/failed, reason/i.test(String(error.message || ""))) {
+        throw new Error("Could not reach the AI provider. Check network access or try again.");
+      }
+
+      if (shouldRetryHuggingFace(String(error.message || "")) && attempt < HF_MAX_RETRIES) {
+        await sleep(2000 * attempt);
+        continue;
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    if (/failed, reason/i.test(String(error.message || ""))) {
-      throw new Error("Could not reach the AI provider. Check network access or try again.");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw new Error("Summarization timed out while waiting for the AI provider.");
 }
 
 function splitChunkInHalf(chunkText) {
@@ -304,6 +345,66 @@ async function fetchPageTextFromUrl(url) {
   }
 }
 
+function buildSummaryPayload(summary, sourceText, mode) {
+  const normalizedSummary = String(summary || "").trim();
+  const cleanInputText = String(sourceText || "").trim();
+
+  const originalWordCount = cleanInputText.split(/\s+/).filter(Boolean).length;
+  const originalSentenceCount = cleanInputText
+    .split(/[.!?]+/)
+    .filter(s => s.trim().length > 0).length;
+
+  const summaryWordCount = normalizedSummary.split(/\s+/).filter(Boolean).length;
+  const summarySentenceCount = normalizedSummary
+    .split(/[.!?]+/)
+    .filter(s => s.trim().length > 0).length;
+
+  const compressionRatio = (
+    ((originalWordCount - summaryWordCount) / originalWordCount) * 100
+  ).toFixed(2);
+
+  const recommendedLengthPercentage = 33;
+  const actualLengthPercentage = (
+    (summaryWordCount / originalWordCount) * 100
+  ).toFixed(2);
+
+  const withinRecommendedLength = summaryWordCount <= originalWordCount / 3;
+
+  const points = normalizedSummary
+    .split(/(?<=\.)\s+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 20);
+
+  const keywords = extractKeywords(normalizedSummary.length > 150 ? normalizedSummary : cleanInputText, 8);
+
+  return {
+    summary: normalizedSummary,
+    keywords,
+    points,
+    metrics: {
+      originalWordCount,
+      originalSentenceCount,
+      summaryWordCount,
+      summarySentenceCount,
+      compressionRatio,
+      recommendedLengthPercentage,
+      actualLengthPercentage,
+      withinRecommendedLength
+    },
+    mode
+  };
+}
+
+function buildLocalFallbackPayload(text, reason) {
+  const fallback = summarizeTextLocally(text);
+  const summary = fallback.summary || fallback.points?.join(". ") || text.slice(0, 500);
+
+  return {
+    ...buildSummaryPayload(summary, text, "local-extractive-fallback"),
+    warning: reason
+  };
+}
+
 app.post("/extract-url", async (req, res) => {
   try {
     const normalizedUrl = normalizeUrl(req.body?.url);
@@ -352,59 +453,35 @@ app.post("/summarize", async (req, res) => {
       });
     }
 
+    const cleanInputText = truncateWords(text.replace(/\s+/g, " ").trim(), MAX_SOURCE_WORDS);
     if (!process.env.HF_API_KEY) {
-      return res.status(500).json({
-        error: "HF_API_KEY is missing on server. Please configure backend/.env."
-      });
+      return res.json(buildLocalFallbackPayload(
+        cleanInputText,
+        "HF_API_KEY is missing on server, so a local fallback summary was used."
+      ));
     }
 
-    const cleanInputText = truncateWords(text.replace(/\s+/g, " ").trim(), MAX_SOURCE_WORDS);
-    const summary = await summarizeLongText(cleanInputText);
+    try {
+      const summary = await summarizeLongText(cleanInputText);
+      return res.json(buildSummaryPayload(summary, cleanInputText, "ai-abstractive-online"));
+    } catch (error) {
+      const message = String(error.message || "");
+      if (message.startsWith("MODEL_OVERFLOW:")) {
+        throw error;
+      }
 
-    const originalWordCount = cleanInputText.split(/\s+/).length;
-    const originalSentenceCount = cleanInputText
-      .split(/[.!?]+/)
-      .filter(s => s.trim().length > 0).length;
+      if (
+        /timed out while waiting for the ai provider|could not reach the ai provider|loading|temporarily unavailable/i.test(message)
+      ) {
+        console.warn("Falling back to local summarizer:", message);
+        return res.json(buildLocalFallbackPayload(
+          cleanInputText,
+          `AI provider unavailable: ${message}`
+        ));
+      }
 
-    const summaryWordCount = summary.split(/\s+/).length;
-    const summarySentenceCount = summary
-      .split(/[.!?]+/)
-      .filter(s => s.trim().length > 0).length;
-
-    const compressionRatio = (
-      ((originalWordCount - summaryWordCount) / originalWordCount) * 100
-    ).toFixed(2);
-
-    const recommendedLengthPercentage = 33;
-    const actualLengthPercentage = (
-      (summaryWordCount / originalWordCount) * 100
-    ).toFixed(2);
-
-    const withinRecommendedLength = summaryWordCount <= originalWordCount / 3;
-
-    const points = summary
-      .split(/(?<=\.)\s+/)
-      .map(s => s.trim())
-      .filter(s => s.length > 20);
-
-    const keywords = extractKeywords(summary.length > 150 ? summary : cleanInputText, 8);
-
-    res.json({
-      summary,
-      keywords,
-      points,
-      metrics: {
-        originalWordCount,
-        originalSentenceCount,
-        summaryWordCount,
-        summarySentenceCount,
-        compressionRatio,
-        recommendedLengthPercentage,
-        actualLengthPercentage,
-        withinRecommendedLength
-      },
-      mode: "ai-abstractive-online"
-    });
+      throw error;
+    }
   } catch (error) {
     console.error("Server Error:", error.message);
     const msg = String(error.message || "");
